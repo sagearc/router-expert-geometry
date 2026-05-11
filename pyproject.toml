@@ -1,0 +1,7 @@
+[project]
+name = "router-expert-geometry"
+version = "0.1.0"
+description = "Official code for Routers Learn the Geometry of Their Experts"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
