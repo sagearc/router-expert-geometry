@@ -54,20 +54,20 @@ evaluates the native Transformers model.
 ```bash
 uv run --locked --extra steering historical-causal \
   --checkpoint-step 50000 --eval-root /data/causal-eval \
-  --condition-set all_controls --out /results/steering.json
+  --out /results/steering.json
 ```
 
 The evaluation root contains eleven corpus directories, each with
-`val/part-0-00000.npy`. Each corpus contributes four calibration sequences and
-sixteen evaluation sequences of 512 next-token predictions. These are corpus
+`val/part-0-00000.npy`. Each corpus contributes sixteen evaluation sequences
+of 512 next-token predictions, skipping the first four rows to preserve the
+rebuttal's evaluation split. These are corpus
 validation sequences, not Wikipedia-title prompts.
 
-- `all_controls` evaluates router removal and all 32 orthogonal controls at every layer (0–15).
-- `pilot` (default) evaluates half/full removal, calibrated controls and input-norm restoration at layer 15.
+- Evaluates full router-direction removal and all 32 orthogonal controls at every layer (0–15).
 - Directions are unit vectors. Controls are constructed from gate/up response energy in the router's orthogonal complement.
 - Steering changes dispatched expert inputs after routing. Target-layer expert IDs and mixture weights must remain unchanged.
 - Unchanged prefixes are cached; cached/full-forward parity is checked on fixed samples.
-- Rank 1 means the largest mean loss increase among the 33 interventions. Norm-restored comparisons are separate.
+- Rank 1 means the largest mean loss increase among the 33 interventions.
 - Results record per-sequence losses, token hashes, model configuration and checks. Existing outputs are not overwritten.
 
 Do not combine results from different configurations into one claim.

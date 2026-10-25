@@ -1,21 +1,19 @@
-"""Router-axis steering with calibrated orthogonal controls and norm restoration.
+"""Rank router-axis removal against 32 weight-derived controls at all 16 layers.
 
 Uses the upstream OLMo-core factory without overriding normalization.
-The pilot steers the final layer; all_controls covers all 16 layers.
 """
 
 import argparse
 from pathlib import Path
 
 from src.configs.public_olmoe import OLMOE_CHECKPOINT_REVISIONS
-from src.hf.historical_causal import ConditionSet, run
+from src.hf.historical_causal import run
 
 
 class Args:
     checkpoint_step: int
     eval_root: Path
     out: Path
-    condition_set: ConditionSet
 
 
 def main() -> None:
@@ -24,6 +22,5 @@ def main() -> None:
                         help='retained experiment checkpoint; its commit is fixed in configuration')
     parser.add_argument('--eval-root', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--condition-set', choices=('pilot', 'all_controls'), default='pilot')
     args = parser.parse_args(namespace=Args())
-    run(OLMOE_CHECKPOINT_REVISIONS[args.checkpoint_step], args.eval_root, args.out, args.condition_set)
+    run(OLMOE_CHECKPOINT_REVISIONS[args.checkpoint_step], args.eval_root, args.out)

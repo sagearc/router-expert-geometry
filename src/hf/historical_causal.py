@@ -1,4 +1,4 @@
-"""Router-axis steering with calibrated orthogonal controls and norm restoration.
+"""Router-axis removal versus 32 weight-derived orthogonal controls.
 
 Uses the upstream OLMo-core factory without architecture overrides.
 """
@@ -10,7 +10,7 @@ from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -26,7 +26,6 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, OlmoeConfig
 
 from src.constants import (
-    CAUSAL_CALIBRATION_SEQUENCES,
     CAUSAL_CANDIDATE_SEED,
     CAUSAL_CANDIDATES,
     CAUSAL_POWER_ITERATIONS,
@@ -36,11 +35,9 @@ from src.constants import (
     OLMOE_MODEL_ID,
     VALIDATION_DOMAINS,
 )
-from src.hf.causal import expert_energy, orthogonal_candidates, paired_summary
-from src.sequences import causal_rows
+from src.hf.causal import orthogonal_candidates, paired_summary
+from src.sequences import evaluation_sequences
 from src.types import Float64Array, RouterOutput
-
-type ConditionSet = Literal['pilot', 'all_controls']
 
 
 def convert_weights(
@@ -100,29 +97,22 @@ def expert_ids(x: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
 
 def project(
     x: torch.Tensor, counts: torch.Tensor, directions: torch.Tensor,
-    alpha: float, restore_norm: bool,
 ) -> torch.Tensor:
-    if not 0 <= alpha <= 1 or directions.shape != (len(counts), x.shape[-1]):
-        raise ValueError('invalid projection strength or expert directions')
-    if alpha == 0:
-        return x
+    if directions.shape != (len(counts), x.shape[-1]):
+        raise ValueError('invalid expert direction shape')
     unit = directions[expert_ids(x, counts)].float()
     values = x.float()
-    result = values - alpha * (values * unit).sum(-1, keepdim=True) * unit
-    if restore_norm:
-        norm = result.norm(dim=-1, keepdim=True)
-        eps = torch.finfo(result.dtype).eps
-        result *= torch.where(norm > eps, values.norm(dim=-1, keepdim=True) / norm.clamp_min(eps), 1.0)
+    result = values - (values * unit).sum(-1, keepdim=True) * unit
     return result.to(x.dtype)
 
 
 @contextmanager
 def intervention(
-    mlp: DroplessMoEMLP, directions: torch.Tensor, alpha: float, restore_norm: bool,
+    mlp: DroplessMoEMLP, directions: torch.Tensor,
 ) -> Generator[None, None, None]:
     def hook(_module: DroplessMoEMLP, args: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         x, counts = args
-        return project(x, counts, directions, alpha, restore_norm), counts
+        return project(x, counts, directions), counts
 
     with mlp.register_forward_pre_hook(hook):
         yield
@@ -132,8 +122,6 @@ def intervention(
 class Controls:
     router: torch.Tensor
     vectors: torch.Tensor
-    router_energy: torch.Tensor
-    candidate_energy: torch.Tensor
 
     @classmethod
     def build(cls, mlp: DroplessMoEMLP, router_weight: torch.Tensor, layer: int) -> 'Controls':
@@ -144,75 +132,20 @@ class Controls:
         router = router / norm
         gate = mlp.w1.detach().view(mlp.num_experts, mlp.hidden_size, mlp.d_model)
         up = mlp.w3.detach().view_as(gate)
-        vectors, energies = orthogonal_candidates(
+        vectors, _ = orthogonal_candidates(
             gate, up, router, count=CAUSAL_CANDIDATES, iterations=CAUSAL_POWER_ITERATIONS,
             seed=CAUSAL_CANDIDATE_SEED + layer)
-        unit = router[:, None]
-        router_energy = (unit * expert_energy(unit, gate, up)).sum(-1).squeeze(1)
-        return cls(router, vectors, router_energy, energies)
-
-    def calibrate(
-        self, model: Transformer, mlp: DroplessMoEMLP, sequences: torch.Tensor,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
-        router_sum = torch.zeros_like(self.router_energy)
-        candidate_sum = torch.zeros_like(self.candidate_energy)
-        counts_sum = torch.zeros_like(self.router_energy)
-
-        def moments(_module: DroplessMoEMLP, args: tuple[torch.Tensor, torch.Tensor]) -> None:
-            x, counts = args
-            ids = expert_ids(x, counts)
-            x = x.float()
-            router_sum.index_add_(0, ids, (x * self.router[ids]).sum(-1).square())
-            dots = torch.einsum('nd,nkd->nk', x, self.vectors[ids])
-            candidate_sum.index_add_(0, ids, dots.square())
-            counts_sum.add_(counts)
-
-        with mlp.register_forward_pre_hook(moments):
-            for sequence in sequences:
-                loss(model, sequence)
-        # Preserve historical operation order for exact matched-control selection.
-        candidate_eta = self.candidate_energy * (candidate_sum / counts_sum.clamp_min(1)[:, None])
-        router_eta = self.router_energy * (router_sum / counts_sum.clamp_min(1))
-        matched = (candidate_eta - router_eta[:, None]).abs().argmin(-1)
-        hard = candidate_eta.argmax(-1)
-        rows = torch.arange(len(self.router), device=self.router.device)
-        directions = {'router': self.router, 'matched': self.vectors[rows, matched],
-                      'hard': self.vectors[rows, hard]}
-        probabilities = candidate_eta.clamp_min(0)
-        probabilities = probabilities / probabilities.sum(-1, keepdim=True).clamp_min(torch.finfo(probabilities.dtype).eps)
-        probabilities[candidate_eta.sum(-1) <= 0] = 1 / probabilities.shape[-1]
-        for index, seed in enumerate((1701, 1702, 1703)):
-            generator = torch.Generator(device='cpu').manual_seed(seed)
-            chosen = torch.multinomial(probabilities.cpu(), 1, replacement=True, generator=generator).squeeze(-1)
-            directions[f'weighted{index}'] = self.vectors[rows, chosen.to(rows.device)]
-        directions.update({f'candidate{i:02d}': self.vectors[:, i] for i in range(self.vectors.shape[1])})
-        calibration: dict[str, object] = {'counts': counts_sum.tolist(), 'matched_index': matched.tolist(),
-                                         'hard_index': hard.tolist(), 'router_eta': router_eta.tolist(),
-                                         'candidate_eta': candidate_eta.tolist()}
-        return directions, calibration
+        return cls(router, vectors)
 
 
-def conditions(profile: ConditionSet) -> list[tuple[str, str, float, bool]]:
-    if profile == 'all_controls':
-        return [(f'{name}_alpha1', name, 1.0, False)
-                for name in ['router', *[f'candidate{i:02d}' for i in range(CAUSAL_CANDIDATES)]]]
-    return [('identity_alpha0', 'router', 0.0, False),
-            ('router_alpha0.5', 'router', .5, False), ('router_alpha1', 'router', 1.0, False),
-            ('matched_alpha0.5', 'matched', .5, False), ('matched_alpha1', 'matched', 1.0, False),
-            ('router_alpha1_norm', 'router', 1.0, True), ('matched_alpha1_norm', 'matched', 1.0, True),
-            *[(f'{name}_alpha1', name, 1.0, False) for name in ('hard', 'weighted0', 'weighted1', 'weighted2')]]
-
-
-def load_sequences(root: Path) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-    calibration: list[torch.Tensor] = []
+def load_sequences(root: Path) -> tuple[torch.Tensor, list[str]]:
     evaluation: list[torch.Tensor] = []
     ids: list[str] = []
     for domain in VALIDATION_DOMAINS:
-        rows = torch.from_numpy(causal_rows(root / domain / 'val' / 'part-0-00000.npy').astype(np.int64))
-        calibration.extend(rows[:CAUSAL_CALIBRATION_SEQUENCES])
-        evaluation.extend(rows[CAUSAL_CALIBRATION_SEQUENCES:])
+        rows = evaluation_sequences(root / domain / 'val' / 'part-0-00000.npy')
+        evaluation.extend(torch.from_numpy(rows.astype(np.int64)))
         ids.extend(f'{domain}-eval-{i:04d}' for i in range(CAUSAL_SEQUENCES_PER_DOMAIN))
-    return torch.stack(calibration), torch.stack(evaluation), ids
+    return torch.stack(evaluation), ids
 
 
 def loss(model: Transformer, sequence: torch.Tensor, layer: int | None = None, hidden: torch.Tensor | None = None) -> float:
@@ -248,26 +181,26 @@ def capture_routes(router: MoERouter, records: list[str]) -> Generator[None, Non
 
 
 def evaluate_layer(
-    model: Transformer, layer: int, calibration: torch.Tensor, sequences: torch.Tensor,
-    condition_set: ConditionSet, baseline: Float64Array, hidden: list[torch.Tensor], routes: list[str],
+    model: Transformer, layer: int, sequences: torch.Tensor,
+    baseline: Float64Array, hidden: list[torch.Tensor], routes: list[str],
 ) -> dict[str, object]:
     """Steer one layer; reject changed routing or cached/full-forward disagreement."""
     moe = cast(MoETransformerBlock, model.blocks[str(layer)]).feed_forward_moe
     mlp = cast(DroplessMoEMLP, moe.experts.mlp)
     controls = Controls.build(mlp, cast(torch.Tensor, moe.router.weight), layer)
-    directions, diagnostics = controls.calibrate(model, mlp, calibration)
+    directions = {'router_alpha1': controls.router}
+    directions.update({f'candidate{i:02d}_alpha1': controls.vectors[:, i]
+                       for i in range(controls.vectors.shape[1])})
     losses: dict[str, Float64Array] = {}
     records = {}
     parity_indices = sorted({0, len(sequences) // 2, len(sequences) - 1})
 
-    for index, (name, direction, alpha, restore) in enumerate(conditions(condition_set)):
+    for index, (name, direction) in enumerate(directions.items()):
         observed: list[str] = []
-        with intervention(mlp, directions[direction], alpha, restore), capture_routes(moe.router, observed):
+        with intervention(mlp, direction), capture_routes(moe.router, observed):
             values = np.array([loss(model, row, layer, hidden[i]) for i, row in enumerate(sequences)])
             if observed != routes:
                 raise ValueError(f'intervention changed target routing: layer {layer}, {name}')
-            if alpha == 0:
-                np.testing.assert_array_equal(values, baseline)
             # Repeat the first two conditions without prefix caching.
             if index < 2:
                 observed.clear()
@@ -280,30 +213,24 @@ def evaluate_layer(
                          'target_routes_unchanged': True}
         print(f'layer={layer} {name} CE={values.mean():.9f}', flush=True)
 
-    comparisons: dict[str, object] = {}
-    if condition_set == 'all_controls':
-        router_loss = float(losses['router_alpha1'].mean())
-        comparisons['router_rank'] = 1 + sum(float(values.mean()) > router_loss
-                                             for name, values in losses.items() if name != 'router_alpha1')
-    else:
-        for suffix in ('0.5', '1', '1_norm'):
-            delta = losses[f'router_alpha{suffix}'] - losses[f'matched_alpha{suffix}']
-            comparisons[suffix] = {**paired_summary(delta), 'extra_ppl_percent': 100 * math.expm1(float(delta.mean()))}
-    return {'calibration': diagnostics, 'conditions': records, 'comparisons': comparisons,
+    router_loss = float(losses['router_alpha1'].mean())
+    rank = 1 + sum(float(values.mean()) > router_loss
+                   for name, values in losses.items() if name != 'router_alpha1')
+    return {'conditions': records, 'comparisons': {'router_rank': rank},
             'cached_full_parity': True}
 
 
 @torch.inference_mode()
-def run(revision: str, eval_root: Path, out: Path, condition_set: ConditionSet) -> None:
+def run(revision: str, eval_root: Path, out: Path) -> None:
     if not torch.cuda.is_available() or out.exists():
         raise ValueError('requires CUDA and a new output file')
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    layers = [OLMOE_LAYERS - 1] if condition_set == 'pilot' else list(range(OLMOE_LAYERS))
-    calibration, sequences, sample_ids = load_sequences(eval_root)
+    layers = list(range(OLMOE_LAYERS))
+    sequences, sample_ids = load_sequences(eval_root)
     model, revision = load_model(revision)
     vocab = model.embeddings.num_embeddings
-    if min(calibration.min(), sequences.min()) < 0 or max(calibration.max(), sequences.max()) >= vocab:
+    if sequences.min() < 0 or sequences.max() >= vocab:
         raise ValueError('token outside model vocabulary')
     first_block = cast(MoETransformerBlock, model.blocks['0'])
     layer_results: dict[str, object] = {}
@@ -313,7 +240,7 @@ def run(revision: str, eval_root: Path, out: Path, condition_set: ConditionSet) 
         'block_type': type(first_block).__name__,
         'rms_norm_eps': first_block.feed_forward_norm.eps,
         'rope_theta': first_block.attention.rope.theta,
-        'torch': torch.__version__, 'condition_set': condition_set,
+        'torch': torch.__version__, 'condition_set': 'all_controls',
         'sequence_length': CAUSAL_PREDICTIONS, 'sample_ids': sample_ids,
         'sequence_sha256': [hashlib.sha256(row.numpy().astype('<i8').tobytes()).hexdigest() for row in sequences],
         'candidate_count': CAUSAL_CANDIDATES, 'power_iterations': CAUSAL_POWER_ITERATIONS,
@@ -336,6 +263,6 @@ def run(revision: str, eval_root: Path, out: Path, condition_set: ConditionSet) 
     out.parent.mkdir(parents=True, exist_ok=True)
     for layer in layers:
         layer_results[str(layer)] = evaluate_layer(
-            model, layer, calibration, sequences, condition_set, baseline, cache[layer], routes[layer])
+            model, layer, sequences, baseline, cache[layer], routes[layer])
         result['complete'] = layer == layers[-1]
         out.write_text(json.dumps(result, indent=2) + '\n')

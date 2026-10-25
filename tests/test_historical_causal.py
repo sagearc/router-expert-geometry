@@ -54,7 +54,7 @@ def test_cli_uses_fixed_checkpoint_without_architecture_modes(monkeypatch, tmp_p
                                     '--eval-root', str(tmp_path), '--out', str(tmp_path / 'result.json')])
     monkeypatch.setattr(cli, 'run', lambda *args: received.append(args))
     cli.main()
-    assert received == [(revision, tmp_path, tmp_path / 'result.json', 'pilot')]
+    assert received == [(revision, tmp_path, tmp_path / 'result.json')]
 
 
 def test_checkpoint_loader_preserves_fp32_weights_and_expert_computation(monkeypatch, tmp_path):
@@ -113,25 +113,19 @@ def test_checkpoint_loader_preserves_fp32_weights_and_expert_computation(monkeyp
         torch.testing.assert_close(output, x @ mlp.w1[:8].T)
 
 
-def test_projection_strength_norm_restoration_and_hook_cleanup():
+def test_full_projection_removal_and_hook_cleanup():
     values = torch.tensor([[3., 4., 1.], [2., -1., 5.], [7., 2., -3.]])
     counts = torch.tensor([2, 1])
     unit = torch.tensor([[1., 0., 0.], [0., 1., 0.]])
     expected = torch.tensor([[0., 4., 1.], [0., -1., 5.], [7., 0., -3.]])
-    assert runner.project(values, counts, unit, 0, False) is values
-    torch.testing.assert_close(runner.project(values, counts, unit, 1, False), expected)
-    torch.testing.assert_close(runner.project(values, counts, unit, .5, False), (values + expected) / 2)
-    restored = runner.project(values, counts, unit, 1, True)
-    torch.testing.assert_close(restored.norm(dim=-1), values.norm(dim=-1))
-    torch.testing.assert_close((restored * unit[torch.tensor([0, 0, 1])]).sum(-1), torch.zeros(3))
-    assert torch.isfinite(runner.project(unit, torch.ones(2, dtype=torch.long), unit, 1, True)).all()
+    torch.testing.assert_close(runner.project(values, counts, unit), expected)
 
     class Expert(torch.nn.Module):
         def forward(self, x, sizes):
             return x, sizes
 
     expert = Expert()
-    with pytest.raises(RuntimeError, match='failure'), runner.intervention(expert, unit, 1, False):
+    with pytest.raises(RuntimeError, match='failure'), runner.intervention(expert, unit):
         torch.testing.assert_close(expert(values, counts)[0], expected)
         raise RuntimeError('failure')
     assert not expert._forward_pre_hooks
@@ -146,9 +140,6 @@ def test_power_iteration_uses_both_input_matrices_and_excludes_router():
     torch.testing.assert_close(energies, torch.tensor([[25., 4.]]), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(vectors[..., 0], torch.zeros(1, 2), atol=1e-6, rtol=0)
     torch.testing.assert_close(vectors @ vectors.transpose(1, 2), torch.eye(2)[None], atol=1e-6, rtol=1e-6)
-    assert len(runner.conditions('pilot')) == 11
-    all_controls = runner.conditions('all_controls')
-    assert len(all_controls) == 33 and len({condition[1] for condition in all_controls}) == 33
 
 
 def test_upstream_conversion_keeps_dropless_layout_and_norms_distinct():
@@ -171,35 +162,7 @@ def test_upstream_conversion_keeps_dropless_layout_and_norms_distinct():
     torch.testing.assert_close(actual[prefix + 'feed_forward_norm.weight'], torch.full((4,), 2.))
 
 
-def test_matching_uses_routed_activation_energy_not_just_eigenvalues(monkeypatch):
-    # Router eta is 10; candidates have eta 2 and 40.5. Match the first,
-    # not the highest-eigenvalue/highest-influence second candidate.
-    controls = runner.Controls(
-        router=torch.tensor([[1., 0., 0.]]),
-        vectors=torch.tensor([[[0., 1., 0.], [0., 0., 1.]]]),
-        router_energy=torch.tensor([4.]), candidate_energy=torch.tensor([[1., 9.]]))
-
-    class Expert(torch.nn.Module):
-        def forward(self, x, counts):
-            return x
-
-    expert = Expert()
-    observations = [torch.tensor([[1., 2., 0.]]), torch.tensor([[2., 0., 3.]])]
-
-    def observe(_model, sequence):
-        expert(observations[int(sequence)], torch.tensor([1]))
-        return 0.
-
-    monkeypatch.setattr(runner, 'loss', observe)
-    directions, calibration = controls.calibrate(None, expert, torch.tensor([0, 1]))
-    assert calibration['matched_index'] == [0] and calibration['hard_index'] == [1]
-    assert calibration['counts'] == [2.]
-    assert calibration['router_eta'] == [10.] and calibration['candidate_eta'] == [[2., 40.5]]
-    torch.testing.assert_close(directions['matched'], controls.vectors[:, 0])
-    assert not expert._forward_pre_hooks
-
-
-def test_corpus_split_preserves_calibration_order_and_predictions(tmp_path: Path):
+def test_corpus_split_preserves_retained_evaluation_rows(tmp_path: Path):
     tokens = np.arange(21 * 513, dtype=np.uint16)
     for index, domain in enumerate(VALIDATION_DOMAINS):
         path = tmp_path / domain / 'val' / 'part-0-00000.npy'
@@ -208,9 +171,8 @@ def test_corpus_split_preserves_calibration_order_and_predictions(tmp_path: Path
             np.save(path, tokens)
         else:
             path.write_bytes(tokens.tobytes())
-    calibration, evaluation, ids = runner.load_sequences(tmp_path)
-    assert calibration.shape == (44, 513) and evaluation.shape == (176, 513)
-    np.testing.assert_array_equal(calibration[:4], tokens[:4 * 513].reshape(4, 513))
+    evaluation, ids = runner.load_sequences(tmp_path)
+    assert evaluation.shape == (176, 513)
     np.testing.assert_array_equal(evaluation[:16], tokens[4 * 513:20 * 513].reshape(16, 513))
     assert ids[0] == 'c4_en-eval-0000' and ids[-1] == 'wikitext_103-eval-0015'
     assert paired_summary(np.array([0., 0., 0., 4.])) == {'mean': 1., 'ci95': [0., 3.]}
@@ -244,8 +206,9 @@ def layer_evaluation_case(monkeypatch):
     model = SimpleNamespace(blocks={'0': block}, embeddings=SimpleNamespace(num_embeddings=16))
     sequences = torch.tensor([[1, 2, 3], [4, 5, 6], [2, 0, 1]])
     directions = dict(zip(('router', 'candidate00', 'candidate01'), torch.eye(3)[:, None], strict=True))
-    directions.update({name: directions['candidate00'] for name in ('matched', 'hard', 'weighted0', 'weighted1', 'weighted2')})
-    controls = SimpleNamespace(calibrate=lambda *args: (directions, {'counts': [3]}))
+    controls = runner.Controls(
+        router=directions['router'],
+        vectors=torch.stack([directions['candidate00'], directions['candidate01']], dim=1))
     monkeypatch.setattr(runner.Controls, 'build', lambda *args: controls)
     monkeypatch.setattr(runner, 'CAUSAL_CANDIDATES', 2)
 
@@ -257,10 +220,8 @@ def layer_evaluation_case(monkeypatch):
     return model, sequences, loss
 
 
-@pytest.mark.parametrize('profile,failure', [
-    ('pilot', None), ('all_controls', None), ('all_controls', 'routes'), ('all_controls', 'loss'),
-])
-def test_layer_evaluation_ranks_and_rejects_invalid_cache(monkeypatch, layer_evaluation_case, profile, failure):
+@pytest.mark.parametrize('failure', [None, 'routes', 'loss'])
+def test_layer_evaluation_ranks_and_rejects_invalid_cache(monkeypatch, layer_evaluation_case, failure):
     model, sequences, loss = layer_evaluation_case
     moe = model.blocks['0'].feed_forward_moe
     routes = []
@@ -273,14 +234,15 @@ def test_layer_evaluation_ranks_and_rejects_invalid_cache(monkeypatch, layer_eva
         monkeypatch.setattr(runner, 'loss', lambda *args: loss(*args) + (0.125 if len(args) == 4 else 0.))
     if failure:
         with pytest.raises(ValueError if failure == 'routes' else AssertionError):
-            runner.evaluate_layer(model, 0, sequences, sequences, profile, baseline, hidden, routes)
+            runner.evaluate_layer(model, 0, sequences, baseline, hidden, routes)
     else:
-        result = runner.evaluate_layer(model, 0, sequences, sequences, profile, baseline, hidden, routes)
-        np.testing.assert_array_equal(result['conditions']['router_alpha1']['sequence_ce'], baseline + sequences[:, 0].numpy())
-        if profile == 'all_controls':
-            assert result['comparisons']['router_rank'] == 3
-        else:
-            assert set(result['comparisons']) == {'0.5', '1', '1_norm'}
+        result = runner.evaluate_layer(model, 0, sequences, baseline, hidden, routes)
+        assert result['comparisons']['router_rank'] == 3
+        assert len(result['conditions']) == 3
+        for column, name in enumerate(('router', 'candidate00', 'candidate01')):
+            np.testing.assert_array_equal(
+                result['conditions'][name + '_alpha1']['sequence_ce'],
+                baseline + (column + 1) * sequences[:, column].numpy())
     assert not moe.router._forward_hooks and not moe.experts.mlp._forward_pre_hooks
 
 
@@ -302,22 +264,21 @@ def test_suffix_matches_full_forward_and_preserves_routes_on_tiny_model():
         routes, modified_routes = [], []
         with runner.capture_routes(moe.router, routes):
             runner.loss(model, sequence)
-        with runner.intervention(mlp, unit, 1, True), runner.capture_routes(moe.router, modified_routes):
+        with runner.intervention(mlp, unit), runner.capture_routes(moe.router, modified_routes):
             cached = runner.loss(model, sequence, 1, captured[0])
             full = runner.loss(model, sequence)
         assert cached == full
         assert routes * 2 == modified_routes
 
 
-@pytest.mark.parametrize('profile,layers', [('pilot', [15]), ('all_controls', list(range(16)))])
 def test_run_evaluates_every_requested_layer_with_its_cached_inputs(
-    monkeypatch, tmp_path, layer_evaluation_case, profile, layers,
+    monkeypatch, tmp_path, layer_evaluation_case,
 ):
     model, sequences, _ = layer_evaluation_case
     model.blocks = {str(layer): deepcopy(model.blocks['0']) for layer in range(16)}
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
     monkeypatch.setattr(runner, 'load_model', lambda revision: (model, revision))
-    monkeypatch.setattr(runner, 'load_sequences', lambda root: (sequences, sequences, ['a', 'b', 'c']))
+    monkeypatch.setattr(runner, 'load_sequences', lambda root: (sequences, ['a', 'b', 'c']))
 
     def forward(_model, sequence):
         for block in model.blocks.values():
@@ -326,9 +287,9 @@ def test_run_evaluates_every_requested_layer_with_its_cached_inputs(
 
     visited = []
 
-    def evaluate(_model, layer, calibration, evaluation, condition_set, baseline, hidden, routes):
+    def evaluate(_model, layer, evaluation, baseline, hidden, routes):
         visited.append(layer)
-        assert condition_set == profile and len(routes) == len(sequences)
+        assert len(routes) == len(sequences)
         torch.testing.assert_close(torch.cat(hidden), sequences.float())
         np.testing.assert_array_equal(baseline, sequences.sum(-1).numpy())
         return {'comparisons': {'router_rank': 1}}
@@ -336,7 +297,7 @@ def test_run_evaluates_every_requested_layer_with_its_cached_inputs(
     monkeypatch.setattr(runner, 'loss', forward)
     monkeypatch.setattr(runner, 'evaluate_layer', evaluate)
     out = tmp_path / 'result.json'
-    runner.run('pinned-revision', tmp_path, out, profile)
+    runner.run('pinned-revision', tmp_path, out)
     result = json.loads(out.read_text())
-    assert visited == layers and list(result['layers']) == [str(layer) for layer in layers]
+    assert visited == list(range(16)) and list(result['layers']) == [str(layer) for layer in range(16)]
     assert result['complete']
