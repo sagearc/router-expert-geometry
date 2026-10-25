@@ -3,5 +3,90 @@ name = "router-expert-geometry"
 version = "0.1.0"
 description = "Official code for Routers Learn the Geometry of Their Experts"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.12,<3.14"
+dependencies = ["numpy>=2,<3", "scipy>=1.14,<2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.optional-dependencies]
+models = ["ai2-olmo-core==2.5.0"]
+plots = ["matplotlib>=3.9,<4"]
+public-models = ["transformers==5.1.0", "torch==2.11.0"]
+steering = [
+  "ai2-olmo-core==2.5.0",
+  "transformers==5.1.0",
+  "torch==2.11.0",
+  "safetensors>=0.4.3,<1",
+  "click>=8,<8.4,!=8.3.0",
+]
+
+[project.scripts]
+capture-1b = "src.cli.capture_1b:main"
+capture-ablation = "src.cli.capture_ablation:main"
+capture-domain-counts = "src.cli.capture_domain_counts:main"
+capture-dsv4-rank = "src.cli.capture_dsv4_rank:main"
+capture-public-olmoe = "src.cli.capture_public_olmoe:main"
+capture-qwen-rank = "src.cli.capture_qwen_rank:main"
+capture-token-losses = "src.cli.capture_token_losses:main"
+figure2 = "src.cli.figure2:main"
+figure2-dynamics = "src.cli.figure2_dynamics:main"
+historical-causal = "src.cli.historical_causal:main"
+kmeans-errors = "src.cli.kmeans_errors:main"
+olmoe-layers = "src.cli.olmoe_layers:main"
+olmoe-saved-inputs = "src.cli.olmoe_saved_inputs:main"
+plot-figure2-dynamics = "src.cli.plot_figure2_dynamics:main"
+plot-olmoe-layers = "src.cli.plot_olmoe_layers:main"
+plot-public-rank = "src.cli.plot_public_rank:main"
+prepare-error-sequences = "src.cli.prepare_error_sequences:main"
+prepare-public-titles = "src.cli.prepare_public_titles:main"
+public-causal = "src.cli.public_causal:main"
+router-geometry = "src.cli.router_geometry:main"
+specialist-ablation = "src.cli.specialist_ablation:main"
+specialist-domains = "src.cli.specialist_domains:main"
+summarize-public-causal = "src.cli.summarize_public_causal:main"
+train-1b = "src.cli.train_1b:main"
+train-geometry-7b = "src.cli.train_geometry_7b:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "ruff>=0.11", "mypy>=2.4,<3", "scipy-stubs>=1.14,<2"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+# Upstream OLMo-core (version 2.5.0, two commits after its v2.5.0 tag). The paper's
+# router variants are subclasses in this package, not patches of this dependency.
+[tool.uv.sources]
+ai2-olmo-core = { url = "https://github.com/allenai/OLMo-core/archive/60930ef14c8e4fb93eec071d44e104324d5c1c30.tar.gz" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src", "/tests", "/data", "/README.md",
+  "/pyproject.toml", "/uv.lock", "/.python-version",
+  "/validation/*.md", "/validation/*.json", "/validation/*.txt",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.12"
+follow_imports = "silent"
+disallow_untyped_defs = true
+disallow_any_explicit = true
+disallow_any_generics = true
+warn_return_any = true
+warn_unused_ignores = true
+
+# vLLM and Triton kernels run only in the pinned Linux GPU container.
+# Check against that container's installed source when validating the backend.
+[[tool.mypy.overrides]]
+module = ["vllm.*", "triton_kernels.*"]
+ignore_missing_imports = true
