@@ -2,9 +2,7 @@
 
 from typing import Final
 
-
-# Steps and commits verified in validation/olmoe-saved-chunk8-comparison.json
-# and validation/public-causal-1220k-table.json.
+# Immutable revisions shared by response capture and steering evaluation.
 OLMOE_CHECKPOINT_REVISIONS: Final[dict[int, str]] = {
     5_000: '37c50a5f4d30fba036185f57168ee8df0003f2e0',
     10_000: 'e5642d2d7b37c138775ddf59f685f91788e173b7',

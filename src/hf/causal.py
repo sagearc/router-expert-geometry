@@ -96,7 +96,7 @@ def orthogonal_candidates(
 
 @contextmanager
 def remove_olmoe_direction(
-    experts: OlmoeExperts, directions: torch.Tensor, *, alpha: float = 1.0,
+    experts: OlmoeExperts, directions: torch.Tensor,
 ) -> Generator[None, None, None]:
     """Keep native routing and decoder normalization; change expert inputs only.
 
@@ -108,8 +108,8 @@ def remove_olmoe_direction(
         raise ValueError('requires native eval-mode OlmoeExperts')
     if cast(OlmoeConfig, experts.config)._experts_implementation != 'eager':
         raise ValueError('baseline and intervention must both use eager experts')
-    if directions.shape != (experts.num_experts, experts.hidden_dim) or not 0 <= alpha <= 1:
-        raise ValueError('invalid directions or projection strength')
+    if directions.shape != (experts.num_experts, experts.hidden_dim):
+        raise ValueError('invalid direction shape')
     unit = directions.to(device=experts.gate_up_proj.device, dtype=torch.float32)
     if not torch.isfinite(unit).all() or not torch.allclose(
         unit.norm(dim=-1), torch.ones(len(unit), device=unit.device), atol=1e-5, rtol=1e-5
@@ -117,14 +117,11 @@ def remove_olmoe_direction(
         raise ValueError('directions must be finite unit vectors')
     if 'forward' in experts.__dict__:
         raise ValueError('expert forward is already overridden')
-    original = experts.forward
 
     def forward(
         self: OlmoeExperts, hidden_states: torch.Tensor,
         top_k_index: torch.Tensor, top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
-        if alpha == 0:
-            return original(hidden_states, top_k_index, top_k_weights)
         result = torch.zeros_like(hidden_states)
         with torch.no_grad():
             mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
@@ -135,7 +132,7 @@ def remove_olmoe_direction(
             state = hidden_states[tokens]
             values = state.float()
             direction = unit[expert]
-            state = (values - alpha * (values * direction).sum(-1, keepdim=True) * direction).to(state.dtype)
+            state = (values - (values * direction).sum(-1, keepdim=True) * direction).to(state.dtype)
             gate, up = F.linear(state, self.gate_up_proj[expert]).chunk(2, dim=-1)
             output = F.linear(self.act_fn(gate) * up, self.down_proj[expert])
             output = output * top_k_weights[tokens, positions, None]
@@ -219,9 +216,6 @@ def run(revision: str, eval_root: Path) -> PublicCausalResult:
         unit = F.normalize(moe.gate.weight.detach().float(), dim=-1)
         gate, up = moe.experts.gate_up_proj.detach().chunk(2, dim=1)
         candidates, energies = orthogonal_candidates(gate, up, unit, count=CAUSAL_CANDIDATES, iterations=CAUSAL_POWER_ITERATIONS, seed=CAUSAL_CANDIDATE_SEED + layer)
-        with remove_olmoe_direction(moe.experts, unit, alpha=0):
-            identity = sequence_losses(model, sequences)
-        np.testing.assert_array_equal(identity, baseline)
         conditions: dict[str, CausalCondition] = {}
         router_losses = None
         for name, direction in [('router', unit), *[(f'candidate{i:02d}', candidates[:, i]) for i in range(CAUSAL_CANDIDATES)]]:
