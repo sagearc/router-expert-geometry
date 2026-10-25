@@ -19,7 +19,7 @@ uv run --locked --extra models --extra public-models --extra plots pytest -q
 ```
 
 Extras are `models` (paper checkpoints/training), `public-models`
-(Transformers), `steering` (OLMo-core with public weights), and `plots`.
+(Transformers response and steering experiments), and `plots`.
 OLMo-core is unmodified upstream commit
 `60930ef14c8e4fb93eec071d44e104324d5c1c30`; local routers extend it.
 Do not install a personal fork or use `--no-sources`.
@@ -28,28 +28,33 @@ On clusters, reuse public Docker images, not new virtual environments.
 The steering runtime is
 `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel@sha256:53ab3de62f6101d1e42f9be28623ab7a468a24c070d632f211ed576e30b6abd3`.
 Inside that container, install with
-`uv pip install --system --break-system-packages -e '.[steering]'`.
+`uv pip install --system --break-system-packages -e '.[public-models]'`.
 Under Slurm, use `srun --kill-on-bad-exit=1` and request only needed GPUs.
 DeepSeek has separate [runtime requirements](validation/public-rank.md).
 
 ## Router-axis steering
 
 ```bash
-uv run --locked --extra steering historical-causal \
+uv run --locked --extra public-models public-causal \
   --checkpoint-step 50000 --eval-root /data/causal-eval --out steering.json
 ```
 
-Full unit-router projection removal versus 32 weight-derived orthogonal
-controls, after dispatch and before expert gate/up projections. Rank 1 is
+Four fixed interventions versus 32 weight-derived orthogonal controls,
+after dispatch and before expert gate/up projections. Rank 1 is
 the highest mean CE among 33 interventions. All 16 layers use the same 176
-validation sequences and fixed routing; cached/full-forward parity is checked.
+validation sequences and unchanged target-layer routing; cached/full-forward
+parity is checked.
 
-This command uses the OLMo-core factory defaults: post-normalization,
-RoPE 500000, epsilon 1e-6 and FP32. It does **not** reproduce native OLMoE's
-forward configuration. See [protocol and results](validation/STEERING_CLAIM.md).
-`public-causal` and `summarize-public-causal` retain the
-[native-model fidelity check](validation/public-intervention.md), not another
-rebuttal result.
+The four edits are full projection removal, 5%/10% input-norm displacement,
+and a 0.1-radian norm-preserving rotation. They are fixed in the protocol,
+not optional architecture or exploratory-strength flags. Use
+`summarize-public-causal steering.json` for the 16-layer result table.
+
+Load the public checkpoint directly through Transformers, without OLMo-core
+conversion or architecture overrides. Read normalization, RoPE and epsilon
+from the checkpoint. See [protocol and results](validation/STEERING_CLAIM.md).
+Historical factory-forward measurements remain in the external audit archive,
+not as a second released model configuration.
 
 ## Figure 2, dynamics and identity controls
 

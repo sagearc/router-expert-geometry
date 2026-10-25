@@ -63,13 +63,18 @@ class PairedSummary(TypedDict):
 
 class CausalCondition(TypedDict):
     sequence_ce: list[float]
-    delta_ce: PairedSummary
-    router_minus_control: NotRequired[PairedSummary]
+    target_routes_unchanged: bool
+
+
+class CausalIntervention(TypedDict):
+    conditions: dict[str, CausalCondition]
+    cached_full_max_error: float
 
 
 class CausalLayer(TypedDict):
-    conditions: dict[str, CausalCondition]
+    interventions: dict[str, CausalIntervention]
     candidate_energies: list[list[float]]
+    cached_baseline_max_error: float
 
 
 class CausalProtocol(TypedDict):
@@ -81,6 +86,7 @@ class CausalProtocol(TypedDict):
     predictions_per_sequence: int
     calibration_sequences_skipped_per_domain: int
     evaluation_sequences_per_domain: int
+    interventions: list[str]
 
 
 class PublicCausalResult(TypedDict):
@@ -94,10 +100,13 @@ class PublicCausalResult(TypedDict):
     sequence_sha256: list[str]
     baseline_sequence_ce: list[float]
     layers: dict[str, CausalLayer]
+    complete: bool
+    model_settings: dict[str, str | float]
 
 
 class CausalSummaryLayer(TypedDict):
     layer_zero_based: int
+    intervention: str
     router_delta_ce: float
     router_rank_descending: int
     controls_tied_with_router: int

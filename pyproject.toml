@@ -14,13 +14,6 @@ build-backend = "hatchling.build"
 models = ["ai2-olmo-core==2.5.0"]
 plots = ["matplotlib>=3.9,<4"]
 public-models = ["transformers==5.1.0", "torch==2.11.0"]
-steering = [
-  "ai2-olmo-core==2.5.0",
-  "transformers==5.1.0",
-  "torch==2.11.0",
-  "safetensors>=0.4.3,<1",
-  "click>=8,<8.4,!=8.3.0",
-]
 
 [project.scripts]
 capture-1b = "src.cli.capture_1b:main"
@@ -32,7 +25,6 @@ capture-qwen-rank = "src.cli.capture_qwen_rank:main"
 capture-token-losses = "src.cli.capture_token_losses:main"
 figure2 = "src.cli.figure2:main"
 figure2-dynamics = "src.cli.figure2_dynamics:main"
-historical-causal = "src.cli.historical_causal:main"
 kmeans-errors = "src.cli.kmeans_errors:main"
 olmoe-layers = "src.cli.olmoe_layers:main"
 olmoe-saved-inputs = "src.cli.olmoe_saved_inputs:main"

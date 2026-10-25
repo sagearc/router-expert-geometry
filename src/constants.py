@@ -1,7 +1,7 @@
 """Fixed model identities and experiment protocols, shared by writers and readers."""
 
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from src.configs.public_olmoe import OLMOE_CHECKPOINT_REVISIONS
 
@@ -82,7 +82,13 @@ FIGURE2_FINAL_IDENTITY_DRAWS: Final = 50
 FIGURE2_SHUFFLE_DRAWS: Final = 20
 
 # Causal writer and summary must agree on the full retained protocol.
-CAUSAL_LAYERS: Final = (0, 5, 8, 10, 15)
+CAUSAL_LAYERS: Final = tuple(range(OLMOE_LAYERS))
+CAUSAL_INTERVENTIONS: Final[dict[str, tuple[Literal['projection', 'relative', 'rotation'], float]]] = {
+    'projection-1': ('projection', 1.),
+    'relative-0.05': ('relative', .05),
+    'relative-0.1': ('relative', .1),
+    'rotation-0.1': ('rotation', .1),
+}
 CAUSAL_CANDIDATES: Final = 32
 CAUSAL_POWER_ITERATIONS: Final = 12
 CAUSAL_CANDIDATE_SEED: Final = 12987
